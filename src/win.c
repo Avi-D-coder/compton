@@ -65,7 +65,7 @@ group_update_focused(session_t *ps, Window leader) {
     return;
 
   for (win *w = ps->list; w; w = w->next) {
-    if (win_get_leader(ps, w) == leader && !w->destroyed)
+    if (win_get_leader(ps, w) == leader && !w->destroying)
       win_update_focused(ps, w);
   }
 
@@ -84,7 +84,7 @@ group_is_focused(session_t *ps, Window leader) {
     return false;
 
   for (win *w = ps->list; w; w = w->next) {
-    if (win_get_leader(ps, w) == leader && !w->destroyed
+    if (win_get_leader(ps, w) == leader && !w->destroying
         && win_is_focused_real(ps, w))
       return true;
   }
@@ -116,6 +116,8 @@ void win_get_region_noframe_local(win *w, region_t *res) {
   if (width > 0 && height > 0)
     pixman_region32_init_rect(res, x, y, width, height);
 }
+
+gen_by_val(win_get_region_noframe_local)
 
 /**
  * Add a window to damaged area.
@@ -319,7 +321,7 @@ void win_determine_mode(session_t *ps, win *w) {
 void win_calc_opacity(session_t *ps, win *w) {
   opacity_t opacity = OPAQUE;
 
-  if (w->destroyed || w->a.map_state != XCB_MAP_STATE_VIEWABLE)
+  if (w->destroying || w->a.map_state != XCB_MAP_STATE_VIEWABLE)
     opacity = 0;
   else {
     // Try obeying opacity property and window type opacity firstly
@@ -350,8 +352,8 @@ void win_calc_opacity(session_t *ps, win *w) {
 void win_calc_dim(session_t *ps, win *w) {
   bool dim;
 
-  // Make sure we do nothing if the window is unmapped / destroyed
-  if (w->destroyed || w->a.map_state != XCB_MAP_STATE_VIEWABLE)
+  // Make sure we do nothing if the window is unmapped / being destroyed
+  if (w->destroying || w->a.map_state != XCB_MAP_STATE_VIEWABLE)
     return;
 
   if (ps->o.inactive_dim && !(w->focused)) {
@@ -376,7 +378,7 @@ void win_determine_fade(session_t *ps, win *w) {
     w->fade_last = w->fade = w->fade_force;
   else if (ps->o.no_fading_openclose && w->in_openclose)
     w->fade_last = w->fade = false;
-  else if (ps->o.no_fading_destroyed_argb && w->destroyed &&
+  else if (ps->o.no_fading_destroyed_argb && w->destroying &&
            win_has_alpha(w) && w->client_win && w->client_win != w->id) {
     w->fade_last = w->fade = false;
   }
@@ -588,7 +590,7 @@ void calc_win_size(session_t *ps, win *w) {
   calc_shadow_geometry(ps, w);
   w->flags |= WFLAG_SIZE_CHANGE;
   // Invalidate the shadow we built
-  free_paint(ps, &w->shadow_paint);
+  //free_paint(ps, &w->shadow_paint);
 }
 
 /**
@@ -720,9 +722,40 @@ void win_recheck_client(session_t *ps, win *w) {
   win_mark_client(ps, w, cw);
 }
 
+/**
+ * Free all resources in a <code>struct _win</code>.
+ */
+void free_win(session_t *ps, win *w) {
+  // Clear active_win if it's pointing to the destroyed window
+  if (w == ps->active_win)
+    ps->active_win = NULL;
+
+  // No need to call backend release_win here because
+  // finish_unmap_win should've done that for us.
+  assert(w->win_data == NULL);
+  pixman_region32_fini(&w->bounding_shape);
+  // BadDamage may be thrown if the window is destroyed
+  set_ignore_cookie(ps,
+      xcb_damage_destroy(ps->c, w->damage));
+  rc_region_unref(&w->reg_ignore);
+  free(w->name);
+  free(w->class_instance);
+  free(w->class_general);
+  free(w->role);
+
+  // Drop w from all prev_trans to avoid accessing freed memory in
+  // repair_win()
+  for (win *w2 = ps->list; w2; w2 = w2->next)
+    if (w == w2->prev_trans)
+      w2->prev_trans = NULL;
+
+  free(w);
+}
+
 // TODO: probably split into win_new (in win.c) and add_win (in compton.c)
 bool add_win(session_t *ps, Window id, Window prev) {
   static const win win_def = {
+      .win_data = NULL,
       .next = NULL,
       .prev_trans = NULL,
 
@@ -736,7 +769,6 @@ bool add_win(session_t *ps, Window id, Window prev) {
       .ever_damaged = false,
       .damage = None,
       .pixmap_damaged = false,
-      .paint = PAINT_INIT,
       .flags = 0,
       .need_configure = false,
       .queue_configure = {},
@@ -745,7 +777,8 @@ bool add_win(session_t *ps, Window id, Window prev) {
 
       .widthb = 0,
       .heightb = 0,
-      .destroyed = false,
+      .state = WSTATE_UNMAPPED,
+      .destroying = false,
       .bounding_shaped = false,
       .rounded_corners = false,
       .to_paint = false,
@@ -792,7 +825,6 @@ bool add_win(session_t *ps, Window id, Window prev) {
       .shadow_dy = 0,
       .shadow_width = 0,
       .shadow_height = 0,
-      .shadow_paint = PAINT_INIT,
       .prop_shadow = -1,
 
       .dim = false,
@@ -820,7 +852,7 @@ bool add_win(session_t *ps, Window id, Window prev) {
   win **p = NULL;
   if (prev) {
     for (p = &ps->list; *p; p = &(*p)->next) {
-      if ((*p)->id == prev && !(*p)->destroyed)
+      if ((*p)->id == prev && !(*p)->destroying)
         break;
     }
   } else {
@@ -860,7 +892,7 @@ bool add_win(session_t *ps, Window id, Window prev) {
   assert(map_state == XCB_MAP_STATE_VIEWABLE || map_state == XCB_MAP_STATE_UNMAPPED);
   new->a.map_state = XCB_MAP_STATE_UNMAPPED;
 
-  if (InputOutput == new->a._class) {
+  if (new->a._class == XCB_WINDOW_CLASS_INPUT_OUTPUT) {
     // Create Damage for window
     new->damage = xcb_generate_id(ps->c);
     xcb_generic_error_t *e = xcb_request_check(ps->c,
@@ -874,6 +906,8 @@ bool add_win(session_t *ps, Window id, Window prev) {
   }
 
   calc_win_size(ps, new);
+
+  log_trace("Window %#010lx: %s %p", id, new->name, new->pictfmt);
 
   new->next = *p;
   *p = new;
@@ -1130,6 +1164,8 @@ void win_extents(win *w, region_t *res) {
       w->g.y + w->shadow_dy, w->shadow_width, w->shadow_height);
 }
 
+gen_by_val(win_extents)
+
 /**
  * Update the out-dated bounding shape of a window.
  *
@@ -1182,10 +1218,15 @@ void win_update_bounding_shape(session_t *ps, win *w) {
   if (w->bounding_shaped && ps->o.detect_rounded_corners)
     win_rounded_corners(ps, w);
 
-  // Window shape changed, we should free old wpaint and shadow pict
-  free_paint(ps, &w->paint);
-  free_paint(ps, &w->shadow_paint);
-  //log_trace("free out dated pict");
+  // Window shape changed, we should free win_data
+  if (ps->redirected && w->state == WSTATE_MAPPED) {
+    // Note we only do this when screen is redirected, because
+    // otherwise win_data is not valid
+    backend_info_t *bi = backend_list[ps->o.backend];
+    bi->release_win(ps->backend_data, ps, w, w->win_data);
+    w->win_data = bi->prepare_win(ps->backend_data, ps, w);
+    //log_trace("free out dated pict");
+  }
 
   win_on_factor_change(ps, w);
 }

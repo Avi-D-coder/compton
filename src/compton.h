@@ -26,10 +26,8 @@
 
 #include <X11/Xutil.h>
 #include <pixman.h>
-#ifdef CONFIG_OPENGL
-#include "opengl.h" // XXX clean up
-#endif
 #include "common.h"
+#include "backend/backend.h"
 #include "win.h"
 #include "x.h"
 #include "c2.h"
@@ -102,14 +100,6 @@ free_wincondlst(c2_lptr_t **pcondlst) {
   while ((*pcondlst = c2_free_lptr(*pcondlst)))
     continue;
 }
-
-#ifndef CONFIG_OPENGL
-static inline void
-free_paint_glx(session_t *ps, paint_t *p) {}
-static inline void
-free_win_res_glx(session_t *ps, win *w) {}
-#endif
-
 /**
  * Create a XTextProperty of a single string.
  */
@@ -161,16 +151,6 @@ dump_drawable(session_t *ps, Drawable drawable) {
   else {
     log_trace("Drawable %#010lx: Failed", drawable);
   }
-}
-
-/**
- * Validate pixmap of a window, and destroy pixmap and picture if invalid.
- */
-static inline void
-win_validate_pixmap(session_t *ps, win *w) {
-  // Destroy pixmap and picture, if invalid
-  if (!x_validate_pixmap(ps, w->paint.pixmap))
-    free_paint(ps, &w->paint);
 }
 
 // vim: set et sw=2 :

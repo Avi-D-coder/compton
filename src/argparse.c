@@ -770,6 +770,8 @@ void get_cfg(session_t *ps, int argc, char *const *argv) {
 		log_warn("--monitor-repaint has no effect when backend is not xrender");
 	}
 
+	assert(backend_list[ps->o.backend] != NULL);
+
 	// Range checking and option assignments
 	ps->o.fade_delta = max_i(ps->o.fade_delta, 1);
 	ps->o.shadow_radius = max_i(ps->o.shadow_radius, 0);

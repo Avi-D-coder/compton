@@ -150,11 +150,32 @@ err1:
 }
 
 /**
+ * Normalize a convolution kernel.
+ */
+static inline void
+normalize_conv_kern(int wid, int hei, xcb_render_fixed_t *kern) {
+  double sum = 0.0;
+  for (int i = 0; i < wid * hei; ++i)
+    sum += XFIXED_TO_DOUBLE(kern[i]);
+  double factor = 1.0 / sum;
+  for (int i = 0; i < wid * hei; ++i)
+    kern[i] = DOUBLE_TO_XFIXED(XFIXED_TO_DOUBLE(kern[i]) * factor);
+}
+
+/**
  * Parse a convolution kernel.
  */
 xcb_render_fixed_t *
 parse_conv_kern(session_t *ps, const char *src, const char **endptr) {
-  return parse_matrix(ps, src, endptr);
+  xcb_render_fixed_t *res = parse_matrix(ps, src, endptr);
+
+  if (!res)
+    return res;
+
+  int w = XFIXED_TO_DOUBLE(res[0]), h = XFIXED_TO_DOUBLE(res[1]);
+  res[h/2*w+w/2+2] = DOUBLE_TO_XFIXED(1.0);
+  normalize_conv_kern(w, h, res+2);
+  return res;
 }
 
 /**

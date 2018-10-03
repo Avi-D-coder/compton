@@ -153,7 +153,8 @@ x_create_picture_with_pictfmt_and_pixmap(
       pixmap, pictfmt->id, valuemask, buf));
   free(buf);
   if (e) {
-    log_error("failed to create picture");
+    x_print_error(e->sequence, e->major_code, e->minor_code, e->error_code);
+    log_error("failed to create picture %p %x", pictfmt, pixmap);
     return XCB_NONE;
   }
   return tmp_picture;
@@ -188,7 +189,7 @@ x_create_picture_with_standard_and_pixmap(
  * Create an picture.
  */
 xcb_render_picture_t
-x_create_picture(session_t *ps, int wid, int hei,
+x_create_picture_with_pictfmt(session_t *ps, int wid, int hei,
   xcb_render_pictforminfo_t *pictfmt, unsigned long valuemask,
   const xcb_render_create_picture_value_list_t *attr)
 {
@@ -212,6 +213,15 @@ x_create_picture(session_t *ps, int wid, int hei,
   xcb_free_pixmap(ps->c, tmp_pixmap);
 
   return picture;
+}
+
+xcb_render_picture_t
+x_create_picture_with_visual(session_t *ps, int w, int h,
+  xcb_visualid_t visual, unsigned long valuemask,
+  const xcb_render_create_picture_value_list_t *attr)
+{
+  xcb_render_pictforminfo_t *pictfmt = x_get_pictform_for_visual(ps, visual);
+  return x_create_picture_with_pictfmt(ps, w, h, pictfmt, valuemask, attr);
 }
 
 bool x_fetch_region(session_t *ps, xcb_xfixes_region_t r, pixman_region32_t *res) {
@@ -247,19 +257,32 @@ void x_set_picture_clip_region(session_t *ps, xcb_render_picture_t pict,
   auto xrects = ccalloc(nrects, xcb_rectangle_t);
   for (int i = 0; i < nrects; i++)
     xrects[i] = (xcb_rectangle_t){
-      .x = rects[i].x1,
-      .y = rects[i].y1,
+      .x = rects[i].x1 + clip_x_origin,
+      .y = rects[i].y1 + clip_y_origin,
       .width = rects[i].x2 - rects[i].x1,
       .height = rects[i].y2 - rects[i].y1,
     };
 
   xcb_generic_error_t *e =
     xcb_request_check(ps->c, xcb_render_set_picture_clip_rectangles_checked(ps->c, pict,
-      clip_x_origin, clip_y_origin, nrects, xrects));
+      0, 0, nrects, xrects));
   if (e)
     log_error("Failed to set clip region");
   free(e);
   free(xrects);
+  return;
+}
+
+void x_clear_picture_clip_region(session_t *ps, xcb_render_picture_t pict) {
+  xcb_render_change_picture_value_list_t v = {
+    .clipmask = None
+  };
+  xcb_generic_error_t *e =
+    xcb_request_check(ps->c, xcb_render_change_picture(ps->c, pict,
+      XCB_RENDER_CP_CLIP_MASK, &v));
+  if (e)
+    log_error("failed to clear clip region");
+  free(e);
   return;
 }
 
@@ -389,4 +412,39 @@ x_validate_pixmap(session_t *ps, xcb_pixmap_t pxmap) {
   unsigned rwid = 0, rhei = 0, rborder = 0, rdepth = 0;
   return XGetGeometry(ps->dpy, pxmap, &rroot, &rx, &ry,
         &rwid, &rhei, &rborder, &rdepth) && rwid && rhei;
+}
+/// Names of root window properties that could point to a pixmap of
+/// background.
+static const char *background_props_str[] = {
+  "_XROOTPMAP_ID",
+  "_XSETROOT_ID",
+  0,
+};
+
+xcb_pixmap_t x_get_root_back_pixmap(session_t *ps) {
+  xcb_pixmap_t pixmap = XCB_NONE;
+
+  // Get the values of background attributes
+  for (int p = 0; background_props_str[p]; p++) {
+    xcb_atom_t prop_atom = get_atom(ps, background_props_str[p]);
+    winprop_t prop =
+      wid_get_prop(ps, ps->root, prop_atom, 1, XCB_ATOM_PIXMAP, 32);
+    if (prop.nitems) {
+      pixmap = *prop.p32;
+      free_winprop(&prop);
+      break;
+    }
+    free_winprop(&prop);
+  }
+
+  return pixmap;
+}
+
+bool x_atom_is_background_prop(session_t *ps, xcb_atom_t atom) {
+  for (int p = 0; background_props_str[p]; p++) {
+    xcb_atom_t prop_atom = get_atom(ps, background_props_str[p]);
+    if (prop_atom == atom)
+      return true;
+  }
+  return false;
 }

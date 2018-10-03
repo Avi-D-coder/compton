@@ -28,6 +28,8 @@ static inline bool safe_isnan(double a) {
   return isnan(a);
 }
 
+typedef struct conv conv;
+
 /**
  * Normalize an int value to a specific range.
  *
@@ -183,3 +185,7 @@ typedef type name##_t; \
 type *name##_new(void); \
 void name##_ref(type *a); \
 void name##_unref(type **a);
+
+unsigned char
+sum_gaussian(conv *map, double opacity,
+             int x, int y, int width, int height);
